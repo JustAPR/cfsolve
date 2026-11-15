@@ -1,7 +1,25 @@
-/target
+# Build output
+/target/
+**/*.rs.bk
+*.pdb
+
+# Environment and secrets
 .env
+.env.*
 *.log
-# capture-proxy's default CA (with its private key) and capture directories.
+
+# Test, proxy, and temporary capture artifacts
 /proxy-ca/
 /captures/
 *.sh
+iframe*.js
+iframe*.html
+payload*.json
+
+# Antigravity & local prompt tracking
+.gemini/
+prompt.txt
+
+# OS artifacts
+.DS_Store
+Thumbs.db

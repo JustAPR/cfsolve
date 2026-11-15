@@ -768,6 +768,16 @@ fn get_include_path(config: &Config) -> Result<PathBuf, String> {
 }
 
 fn generate_bindings(config: &Config) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let bindings_path = config.out_dir.join("bindings.rs");
+    if bindings_path.exists() {
+        return Ok(bindings_path);
+    }
+    let pregenerated = config.manifest_dir.join("src").join("bindings.rs");
+    if pregenerated.exists() {
+        fs::copy(&pregenerated, &bindings_path)?;
+        return Ok(bindings_path);
+    }
+
     let include_path = get_include_path(config)?;
 
     let target_rust_version = bindgen::RustTarget::stable(77, 0)

@@ -26,7 +26,7 @@ fn concrete_register_stack_keeps_its_exception_continuation() {
     let mut run = Run::method(&session);
     run.start_at(0, 0);
     let stack = Value::array(Vec::new());
-    run.registers.insert(7, stack.clone());
+    run.registers[7] = Some(stack.clone());
     let function = Callable::Script {
         name: None,
         function: session.declared("f"),

@@ -31,7 +31,7 @@ pub(super) mod unconditional;
 
 use bindings::Bindings;
 
-use super::ast;
+use super::{HashSet, ast};
 
 /// A binding identity. Unresolved globals use the first reference to their spelling, which lets
 /// helpers assigned to globals participate without inventing symbols.
@@ -70,14 +70,23 @@ pub(super) struct Analysis<'a> {
     pub ast: AstBuilder<'a>,
     pub scoping: Scoping,
     pub bindings: Bindings,
+    pub taken_names: HashSet<String>,
 }
 
 impl<'a> Analysis<'a> {
     pub(super) fn new(allocator: &'a Allocator, scoping: Scoping) -> Self {
+        let mut taken_names = HashSet::default();
+        for symbol in scoping.symbol_ids() {
+            taken_names.insert(scoping.symbol_name(symbol).to_string());
+        }
+        for name in scoping.root_unresolved_references().keys() {
+            taken_names.insert(name.to_string());
+        }
         Self {
             ast: AstBuilder::new(allocator),
             scoping,
             bindings: Bindings::default(),
+            taken_names,
         }
     }
 
@@ -170,9 +179,7 @@ impl<'a> Analysis<'a> {
 
     /// Checks whether a symbol or an unresolved global already uses `name`.
     fn is_name_taken(&self, name: &str) -> bool {
-        self.scoping
-            .symbol_ids()
-            .any(|symbol| self.scoping.symbol_name(symbol) == name)
+        self.taken_names.contains(name)
             || self.scoping.root_unresolved_references().contains_key(name)
     }
 
@@ -206,16 +213,17 @@ impl<'a> Analysis<'a> {
         scope: ScopeId,
         span: Span,
     ) -> BindingIdentifier<'a> {
-        let name = Ident::from_str_in(name, &self.ast);
+        self.taken_names.insert(name.to_string());
+        let ident = Ident::from_str_in(name, &self.ast);
         let symbol = self.scoping.create_symbol(
             span,
-            name,
+            ident,
             SymbolFlags::FunctionScopedVariable,
             scope,
             NodeId::DUMMY,
         );
-        self.scoping.add_binding(scope, name, symbol);
-        BindingIdentifier::new_with_symbol_id(span, name, symbol, &self.ast)
+        self.scoping.add_binding(scope, ident, symbol);
+        BindingIdentifier::new_with_symbol_id(span, ident, symbol, &self.ast)
     }
 
     /// Creates a reference to a local and records its read and write flags in the scoping.

@@ -66,6 +66,20 @@ site's real URL.
 | `--proxy <url>` | Send every request through an `http://`, `https://`, `socks5://`, or `socks5h://` proxy. Put credentials in the URL, as in `socks5h://user:password@host:1080`. |
 | `-h`, `--help` | Show help. |
 
+## Async REST API Server
+
+`cfsolve-server` provides a high-throughput, asynchronous HTTP REST API server (Axum + Tokio) to solve Turnstile widgets and challenge pages concurrently.
+
+```sh
+# Start the server (default: http://0.0.0.0:3000)
+cargo run --release --bin cfsolve-server
+
+# Or run with custom options:
+./target/release/cfsolve-server --port 3000 --default-profile safari-26-ios
+```
+
+See [API_SERVER.md](API_SERVER.md) for full endpoints, JSON request/response formats, and [scripts/client_example.py](scripts/client_example.py) for an async Python client.
+
 ## Library
 
 Add cfsolve as a path dependency and copy its `[patch]` section, since

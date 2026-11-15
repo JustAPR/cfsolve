@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_ext: ""
+            archive_ext: "tar.gz"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_ext: ".exe"
+            archive_ext: "zip"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_ext: ""
+            archive_ext: "tar.gz"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build binaries
+        run: cargo build --release --bin cfsolve --bin cfsolve-server
+
+      - name: Package binaries (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir dist
+          cp target/release/cfsolve dist/
+          cp target/release/cfsolve-server dist/
+          cp README.md API_SERVER.md LICENSE dist/
+          cd dist
+          tar -czf ../cfsolve-${{ matrix.target }}.${{ matrix.archive_ext }} *
+          cd ..
+
+      - name: Package binaries (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path dist
+          Copy-Item target/release/cfsolve.exe dist/
+          Copy-Item target/release/cfsolve-server.exe dist/
+          Copy-Item README.md, API_SERVER.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath cfsolve-${{ matrix.target }}.${{ matrix.archive_ext }}
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: cfsolve-${{ matrix.target }}.${{ matrix.archive_ext }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

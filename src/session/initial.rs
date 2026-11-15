@@ -2,8 +2,11 @@
 //! merges page parameters with iframe state.
 
 use std::mem;
+use std::sync::{LazyLock, RwLock};
 
 use anyhow::{Context, Result};
+use rustc_hash::FxHashMap;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use super::Sink;
@@ -300,11 +303,26 @@ pub(super) async fn fetch(
     })
 }
 
-/// Deobfuscates on a blocking thread, reporting partial transformations as progress.
+static DEOBFUSCATE_CACHE: LazyLock<RwLock<FxHashMap<[u8; 32], (String, CaseOpcodes)>>> =
+    LazyLock::new(|| RwLock::new(FxHashMap::default()));
+
+/// Deobfuscates on a worker thread pool, reporting partial transformations as progress,
+/// with LRU caching by script hash.
 pub(super) async fn deobfuscate(
     sink: &dyn Sink,
     javascript: String,
 ) -> Result<(String, CaseOpcodes)> {
+    let mut hasher = Sha256::new();
+    hasher.update(javascript.as_bytes());
+    let hash: [u8; 32] = hasher.finalize().into();
+
+    if let Ok(cache) = DEOBFUSCATE_CACHE.read() {
+        if let Some(cached) = cache.get(&hash) {
+            sink.progress("Deobfuscation cache hit");
+            return Ok(cached.clone());
+        }
+    }
+
     let (deobfuscated, cases) = deep_stack::run("deobfuscation", move || {
         call_stack::deobfuscate_with_cases(javascript)
     })
@@ -312,7 +330,18 @@ pub(super) async fn deobfuscate(
     if let Some(unconverged) = deobfuscated.unconverged {
         sink.progress(&format!("Warning: {unconverged}"));
     }
-    Ok((deobfuscated.text, cases))
+    let result = (deobfuscated.text, cases);
+
+    if let Ok(mut cache) = DEOBFUSCATE_CACHE.write() {
+        if cache.len() >= 64 {
+            if let Some(first) = cache.keys().next().copied() {
+                cache.remove(&first);
+            }
+        }
+        cache.insert(hash, result.clone());
+    }
+
+    Ok(result)
 }
 
 /// Merges collected page parameters into session options and recovers iframe state, returning

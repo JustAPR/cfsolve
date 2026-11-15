@@ -191,8 +191,8 @@ fn apply<'a>(
     changed
 }
 
-/// Runs rounds of `steps` until no step changes the tree, a round makes no net printed change,
-/// or the round limit is reached. With `cleanup`, each round ends by settling [`CLEANUP`].
+/// Runs rounds of `steps` until no step changes the tree or the round limit is reached.
+/// With `cleanup`, each round ends by settling [`CLEANUP`].
 fn settle<'a>(
     program: &mut Program<'a>,
     analysis: &mut Analysis<'a>,
@@ -202,23 +202,23 @@ fn settle<'a>(
     let mut unchanged = HashMap::default();
     let mut version = 0;
     for _ in 0..MAX_ROUNDS {
-        let before = print(program);
+        let before_version = version;
         let mut changed = false;
         for step in steps.clone() {
             changed |= apply(program, analysis, step, &mut version, &mut unchanged);
         }
         if cleanup {
             for _ in 0..MAX_ROUNDS {
-                let before = version;
+                let before_cleanup = version;
                 for step in CLEANUP {
                     changed |= apply(program, analysis, step, &mut version, &mut unchanged);
                 }
-                if before == version {
+                if before_cleanup == version {
                     break;
                 }
             }
         }
-        if !changed || print(program) == before {
+        if !changed || version == before_version {
             return None;
         }
     }

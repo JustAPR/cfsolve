@@ -55,9 +55,9 @@ pub(crate) struct Run<'ast, 'session> {
     constructed: Option<&'session HashMap<String, Value<'ast>>>,
     /// Strings decrypted from the program's records, once a program is loaded.
     pub(super) decrypted: Option<&'session Decrypted<'ast>>,
-    pub(super) registers: HashMap<u8, Value<'ast>>,
+    pub(super) registers: [Option<Value<'ast>>; 256],
     /// Tags written before their register values; see [`crate::vm::registers`].
-    pub(super) tags: HashMap<u8, Value<'ast>>,
+    pub(super) tags: [Option<Value<'ast>>; 256],
     /// Instance fields this run has read or written.
     pub(super) fields: HashMap<String, Value<'ast>>,
     /// Session bindings this run has read or written.
@@ -298,8 +298,8 @@ impl<'ast, 'session> Run<'ast, 'session> {
             program,
             constructed: None,
             decrypted: None,
-            registers: HashMap::default(),
-            tags: HashMap::default(),
+            registers: std::array::from_fn(|_| None),
+            tags: std::array::from_fn(|_| None),
             fields: HashMap::default(),
             globals: HashMap::default(),
             unavailable: Cow::Borrowed(&session.unavailable),
@@ -326,10 +326,12 @@ impl<'ast, 'session> Run<'ast, 'session> {
         let mut run = Self::invoked(invocation, decisions, Some(Copies::default()));
         for (register, value) in &invocation.session.initial {
             let value = run.isolate(value);
-            run.registers.insert(*register, value);
+            run.registers[*register as usize] = Some(value);
         }
         run.start_at(invocation.pc, invocation.key);
-        run.registers.extend(invocation.known.iter().cloned());
+        for (register, value) in invocation.known {
+            run.registers[*register as usize] = Some(value.clone());
+        }
         run
     }
 
@@ -350,12 +352,10 @@ impl<'ast, 'session> Run<'ast, 'session> {
     /// Sets the program counter to `pc` and the dispatch key to `key`.
     pub(super) fn start_at(&mut self, pc: u32, key: u8) {
         let layout = self.session.layout;
-        self.registers.extend([
-            (layout.pc, Value::Number(f64::from(pc))),
-            (layout.key, Value::Number(f64::from(key))),
-            (layout.program, Value::Program),
-            (layout.cells, Value::Cells),
-        ]);
+        self.registers[layout.pc as usize] = Some(Value::Number(f64::from(pc)));
+        self.registers[layout.key as usize] = Some(Value::Number(f64::from(key)));
+        self.registers[layout.program as usize] = Some(Value::Program);
+        self.registers[layout.cells as usize] = Some(Value::Cells);
     }
 
     /// A run inside a method of the instance, while the session is built.
@@ -404,7 +404,7 @@ impl<'ast, 'session> Run<'ast, 'session> {
         // Native array operations mutate that stack without producing an effect; retain
         // its frame so disassembly can also visit the exception continuation.
         for (register, _) in &self.session.initial {
-            if let Some(value @ Value::Array(elements)) = self.registers.get(register)
+            if let Some(value @ Value::Array(elements)) = &self.registers[*register as usize]
                 && elements.borrow().iter().any(|element| {
                     matches!(element.expr(), Term::Array(ref frame)
                         if disassemble::catch_frame(frame).is_some())
@@ -429,12 +429,12 @@ impl<'ast, 'session> Run<'ast, 'session> {
     fn position(&self) -> Result<Option<Position>, String> {
         let layout = self.session.layout;
         let pc = self
-            .registers
-            .get(&layout.pc)
+            .registers[layout.pc as usize]
+            .as_ref()
             .expect("a handler's run starts with the program counter set");
         let key = self
-            .registers
-            .get(&layout.key)
+            .registers[layout.key as usize]
+            .as_ref()
             .expect("a handler's run starts with the dispatch key set");
         match (pc.number(), key.number()) {
             (Some(pc), _) if pc.is_nan() => Ok(None),
@@ -596,7 +596,7 @@ impl<'ast, 'session> Run<'ast, 'session> {
     }
 
     pub(super) fn set_register(&mut self, register: u8, value: Value<'ast>) {
-        let old = self.registers.insert(register, value);
+        let old = std::mem::replace(&mut self.registers[register as usize], Some(value));
         self.journal.record(Undo::Register(register, old));
     }
 
@@ -636,7 +636,7 @@ impl<'ast, 'session> Run<'ast, 'session> {
         let undone = self.journal.undo.drain(checkpoint.undo..).rev();
         for undo in undone {
             match undo {
-                Undo::Register(key, old) => restore(&mut self.registers, key, old),
+                Undo::Register(key, old) => self.registers[key as usize] = old,
                 Undo::Field(key, old) => restore(&mut self.fields, key, old),
                 Undo::Global(key, old) => restore(&mut self.globals, key, old),
             }
@@ -739,8 +739,8 @@ impl<'ast, 'session> Run<'ast, 'session> {
         Some(Snapshot {
             statement,
             decided: self.branches.decisions[..self.branches.decided].to_vec(),
-            registers: fork.map(&self.registers),
-            tags: fork.map(&self.tags),
+            registers: fork.map_registers(&self.registers),
+            tags: fork.map_registers(&self.tags),
             fields: fork.map(&self.fields),
             globals: fork.map(&self.globals),
             copies: self.copies.as_ref().map(|copies| fork.copies(copies)),
@@ -774,8 +774,8 @@ impl<'ast, 'session> Run<'ast, 'session> {
         let mut fork = Fork::new(Some(&invocation.session.frozen));
         let copies = snapshot.copies.as_ref().map(|copies| fork.copies(copies));
         let mut run = Self::invoked(invocation, decisions, copies);
-        run.registers = fork.map(&snapshot.registers);
-        run.tags = fork.map(&snapshot.tags);
+        run.registers = fork.map_registers(&snapshot.registers);
+        run.tags = fork.map_registers(&snapshot.tags);
         run.fields = fork.map(&snapshot.fields);
         run.globals = fork.map(&snapshot.globals);
         run.closed = snapshot
@@ -813,8 +813,8 @@ pub(super) struct Snapshot<'ast> {
     pub(super) statement: usize,
     /// The decisions consumed before the statement.
     decided: Vec<bool>,
-    registers: HashMap<u8, Value<'ast>>,
-    tags: HashMap<u8, Value<'ast>>,
+    registers: [Option<Value<'ast>>; 256],
+    tags: [Option<Value<'ast>>; 256],
     fields: HashMap<String, Value<'ast>>,
     globals: HashMap<Binding<'ast>, Value<'ast>>,
     copies: Option<Copies<'ast>>,

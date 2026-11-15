@@ -251,6 +251,14 @@ impl<'frozen, 'ast> Fork<'frozen, 'ast> {
         copied
     }
 
+    /// Copies an array of registers' values.
+    pub(super) fn map_registers<const N: usize>(
+        &mut self,
+        regs: &[Option<Value<'ast>>; N],
+    ) -> [Option<Value<'ast>>; N] {
+        std::array::from_fn(|i| regs[i].as_ref().map(|v| self.copy(v)))
+    }
+
     /// Copies the run's [`Copies`], mapping session objects to copies of their run copies.
     pub(super) fn copies(&mut self, copies: &Copies<'ast>) -> Copies<'ast> {
         let values = self.map(&copies.values);

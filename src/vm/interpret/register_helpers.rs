@@ -492,7 +492,10 @@ pub(super) mod tests {
                 let mut registers: Vec<_> = run
                     .registers
                     .iter()
-                    .map(|(key, value)| (*key, format!("{:?}", value.expr())))
+                    .enumerate()
+                    .filter_map(|(key, value)| {
+                        value.as_ref().map(|v| (key as u8, format!("{:?}", v.expr())))
+                    })
                     .collect();
                 registers.sort();
                 format!("{returned:?} {registers:?} {:?}", run.finish(result))

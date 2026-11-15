@@ -113,9 +113,8 @@ impl<'ast> Run<'ast, '_> {
             }
             Value::RegisterSlots(Slots::Tags) => {
                 let register = self.register(key)?;
-                self.tags
-                    .get(&register)
-                    .cloned()
+                self.tags[register as usize]
+                    .clone()
                     .ok_or_else(|| unsupported("tag of a register", key))?
             }
             Value::Program => match (index, name) {
@@ -255,12 +254,12 @@ impl<'ast> Run<'ast, '_> {
             },
             Value::RegisterSlots(Slots::Tags) => {
                 let register = self.register(key)?;
-                self.tags.insert(register, value);
+                self.tags[register as usize] = Some(value);
             }
             // Value storage helpers write the tag before writing the value.
             Value::RegisterSlots(Slots::Values) => {
                 let register = self.register(key)?;
-                let tag = self.tags.remove(&register).and_then(|tag| tag.number());
+                let tag = self.tags[register as usize].take().and_then(|tag| tag.number());
                 let tag = tag.map_or(Stored::Plain, Stored::of);
                 let value = match (tag, &value) {
                     // `read` decrypts on every access, but caching the decrypted value has the same
@@ -349,7 +348,7 @@ impl<'ast> Run<'ast, '_> {
 
     /// Returns the register value, using a symbolic value unless this run has assigned it.
     pub(super) fn register_value(&self, register: u8) -> Value<'ast> {
-        match self.registers.get(&register) {
+        match &self.registers[register as usize] {
             Some(value) => self.refined(value),
             None => self.refined(&Value::symbolic(Term::Reg(register))),
         }
