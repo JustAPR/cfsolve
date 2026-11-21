@@ -104,14 +104,14 @@ def print_banner(server_info: dict, target_url: str, sitekey: str, profile: str)
     print("=" * 72)
 
 
-def run_benchmark(server: str, url: str, sitekey: str, profile: str, iterations: int, concurrency: int, page_source: str):
+def run_benchmark(server: str, url: str, sitekey: str, profile: str, iterations: int, concurrency: int, page_source: str, proxy: str = None):
     print(f"\n[*] Running Benchmark [Mode: page_source='{page_source}', Iterations={iterations}, Concurrency={concurrency}]...")
     results = []
 
     if concurrency <= 1:
         for i in range(1, iterations + 1):
             print(f"  -> Run {i}/{iterations}...", end=" ", flush=True)
-            res = solve_request(server, url, sitekey, page_source, profile)
+            res = solve_request(server, url, sitekey, page_source, profile, proxy)
             results.append(res)
             if res["success"]:
                 print(f"OK [Client: {res['client_ms']:.1f}ms | Server: {res['server_ms']}ms | Token: {res['token'][:24]}...]")
@@ -120,7 +120,7 @@ def run_benchmark(server: str, url: str, sitekey: str, profile: str, iterations:
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = [
-                executor.submit(solve_request, server, url, sitekey, page_source, profile)
+                executor.submit(solve_request, server, url, sitekey, page_source, profile, proxy)
                 for _ in range(iterations)
             ]
             for i, future in enumerate(concurrent.futures.as_completed(futures), 1):
@@ -172,6 +172,7 @@ def main():
     parser.add_argument("--url", default=DEFAULT_URL, help="Target page URL")
     parser.add_argument("--sitekey", default=DEFAULT_SITEKEY, help="Turnstile sitekey")
     parser.add_argument("--profile", default="safari-26-ios", help="Browser profile name")
+    parser.add_argument("--proxy", default=None, help="Egress proxy URL (e.g. socks5://user:pass@host:1080 or http://host:port)")
     parser.add_argument("-n", "--iterations", type=int, default=3, help="Number of benchmark solves")
     parser.add_argument("-c", "--concurrency", type=int, default=1, help="Concurrent workers")
     parser.add_argument("--mode", choices=["blank", "navigate", "both"], default="both", help="Page source mode")
@@ -182,7 +183,7 @@ def main():
 
     modes = ["blank", "navigate"] if args.mode == "both" else [args.mode]
     for mode in modes:
-        run_benchmark(args.server, args.url, args.sitekey, args.profile, args.iterations, args.concurrency, mode)
+        run_benchmark(args.server, args.url, args.sitekey, args.profile, args.iterations, args.concurrency, mode, args.proxy)
 
 
 if __name__ == "__main__":
