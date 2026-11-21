@@ -14,7 +14,8 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::handlers::{
-    clear_handler, health_handler, index_handler, solve_handler, turnstile_handler,
+    clear_handler, dashboard_handler, health_handler, index_handler, solve_handler,
+    turnstile_handler,
 };
 use crate::state::AppState;
 
@@ -92,6 +93,8 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/", get(index_handler))
+        .route("/dashboard", get(dashboard_handler))
+        .route("/playground", get(dashboard_handler))
         .route("/health", get(health_handler))
         .route("/stats", get(health_handler))
         .route("/turnstile", post(turnstile_handler))

@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use url::Url;
 
 use cfsolve::{Clearance, FetchedPage, Options, Outcome, PageSource, Turnstile, Widget};
@@ -15,16 +16,35 @@ use crate::models::{
 use crate::state::{AppState, RequestTracker};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
-/// Root info endpoint with usage guide.
-pub async fn index_handler() -> &'static str {
-    "cfsolve high-performance async API server\n\n\
-    Endpoints:\n\
-    - POST /turnstile  : Solves a Turnstile widget (returns token)\n\
-    - POST /clear      : Solves a Cloudflare challenge page (returns cf_clearance & cookies)\n\
-    - POST /solve      : Auto-detects and solves Turnstile or challenge page\n\
-    - GET  /health     : Health check and server metrics\n\
-    - GET  /stats      : Alias for /health\n"
+/// Dashboard and Playground HTML UI handler.
+pub async fn dashboard_handler() -> Html<&'static str> {
+    Html(DASHBOARD_HTML)
+}
+
+/// Root handler: returns interactive dashboard for browsers, or plaintext for curl/CLI.
+pub async fn index_handler(headers: HeaderMap) -> Response {
+    let accepts_html = headers
+        .get(header::ACCEPT)
+        .and_then(|val| val.to_str().ok())
+        .map(|val| val.contains("text/html"))
+        .unwrap_or(false);
+
+    if accepts_html {
+        Html(DASHBOARD_HTML).into_response()
+    } else {
+        "cfsolve high-performance async API server\n\n\
+        Web Dashboard & Interactive Playground:\n\
+        - Open in browser: http://127.0.0.1:3000/ (or /dashboard, /playground)\n\n\
+        API Endpoints:\n\
+        - POST /turnstile  : Solves a Turnstile widget (returns token)\n\
+        - POST /clear      : Solves a Cloudflare challenge page (returns cf_clearance & cookies)\n\
+        - POST /solve      : Auto-detects and solves Turnstile or challenge page\n\
+        - GET  /health     : Health check and server metrics\n\
+        - GET  /stats      : Alias for /health\n"
+            .into_response()
+    }
 }
 
 /// Health and status handler.

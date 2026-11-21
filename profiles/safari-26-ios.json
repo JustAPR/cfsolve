@@ -222,7 +222,7 @@
       "width": 168.125,
       "height": 24
     },
-    "ready_delay_ms": 1000,
+    "ready_delay_ms": 450,
     "device_pixel_ratio": 2,
     "touch": true
   },
