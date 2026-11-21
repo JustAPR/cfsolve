@@ -75,7 +75,7 @@ pub use browser::Browser;
 pub use deobfuscate::{Deobfuscated, Unconverged, deobfuscate};
 pub use embedding_page::page::Widget;
 pub use error::Error;
-pub use http::PageDocument;
+pub use http::{PageDocument, normalize_proxy};
 pub use js::{JsObject, JsValue};
 pub use session::{Clearance, Outcome, Sink, Stage};
 pub use solver::{FetchedPage, Options, PageSource, Turnstile};

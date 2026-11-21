@@ -644,8 +644,8 @@
           <!-- Optional Proxy -->
           <div class="form-group">
             <label for="input-proxy">Egress Proxy (Optional)</label>
-            <input type="text" id="input-proxy" placeholder="socks5://user:pass@host:port or http://...">
-            <span class="input-hint">Route TLS handshakes and token exchanges through an upstream residential or datacenter proxy.</span>
+            <input type="text" id="input-proxy" placeholder="(Socks5)host:port:user:pass or 1.2.3.4:1080:user:pass or socks5://...">
+            <span class="input-hint">Supports (Socks5)host:port, host:port:user:pass (defaults to HTTP), or standard URIs.</span>
           </div>
 
           <!-- Action & CData (Collapsible) -->
@@ -748,6 +748,7 @@
       // Listeners for snippet update
       document.getElementById('input-url').addEventListener('input', updateCurlSnippet);
       document.getElementById('input-sitekey').addEventListener('input', updateCurlSnippet);
+      document.getElementById('input-proxy').addEventListener('input', updateCurlSnippet);
       document.getElementById('select-page-source').addEventListener('change', updateCurlSnippet);
     });
 
@@ -1019,18 +1020,63 @@
       document.getElementById('chart-latest-stat').textContent = 'Idle';
     }
 
+    function normalizeProxyJs(raw) {
+      let s = (raw || '').trim();
+      if (!s) return '';
+      if (s.includes(',') || s.includes(';')) s = s.split(/[,;\n\r]/)[0].trim();
+      let scheme = 'http';
+      if (s.startsWith('(') || s.startsWith('[')) {
+        const close = s.startsWith('(') ? ')' : ']';
+        const idx = s.indexOf(close);
+        if (idx !== -1) {
+          const tag = s.slice(1, idx).trim().toLowerCase();
+          if (tag === 'socks5' || tag === 'socks') scheme = 'socks5';
+          else if (tag === 'socks5h') scheme = 'socks5h';
+          else if (tag === 'https') scheme = 'https';
+          s = s.slice(idx + 1).trim();
+        }
+      }
+      if (s.includes('://')) return s;
+      for (const prefix of ['socks5h:', 'socks5:', 'https:', 'http:', 'socks:']) {
+        if (s.toLowerCase().startsWith(prefix)) {
+          const tag = prefix.slice(0, -1).toLowerCase();
+          if (tag === 'socks5' || tag === 'socks') scheme = 'socks5';
+          else if (tag === 'socks5h') scheme = 'socks5h';
+          else if (tag === 'https') scheme = 'https';
+          s = s.slice(prefix.length).trim();
+          break;
+        }
+      }
+      if (s.includes('@')) return `${scheme}://${s}`;
+      const parts = s.split(':').map(p => p.trim());
+      if (parts.length === 4) {
+        const isPort = (val) => /^\d+$/.test(val) && Number(val) > 0 && Number(val) <= 65535;
+        if (isPort(parts[1]) && !isPort(parts[3])) {
+          return `${scheme}://${parts[2]}:${parts[3]}@${parts[0]}:${parts[1]}`;
+        } else if (isPort(parts[3]) && !isPort(parts[1])) {
+          return `${scheme}://${parts[0]}:${parts[1]}@${parts[2]}:${parts[3]}`;
+        }
+        return `${scheme}://${parts[2]}:${parts[3]}@${parts[0]}:${parts[1]}`;
+      } else if (parts.length === 2) {
+        return `${scheme}://${parts[0]}:${parts[1]}`;
+      }
+      return `${scheme}://${s}`;
+    }
+
     function updateCurlSnippet() {
       const url = document.getElementById('input-url').value.trim() || 'https://jerryccs.com/auth/';
       const sitekey = document.getElementById('input-sitekey').value.trim() || '0x4AAAAAAFOskVGnd7MM-REl';
       const pageSource = document.getElementById('select-page-source').value;
+      const rawProxy = document.getElementById('input-proxy').value.trim();
+      const proxyField = rawProxy ? `,\n    "proxy": "${normalizeProxyJs(rawProxy)}"` : '';
 
       let cmd = '';
       if (currentMode === 'turnstile') {
-        cmd = `curl -X POST http://127.0.0.1:3000/turnstile \\\n  -H "Content-Type: application/json" \\\n  -d '{"url":"${url}","sitekey":"${sitekey}","page_source":"${pageSource}"}'`;
+        cmd = `curl -X POST http://127.0.0.1:3000/turnstile \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "url": "${url}",\n    "sitekey": "${sitekey}",\n    "page_source": "${pageSource}"${proxyField}\n  }'`;
       } else if (currentMode === 'clear') {
-        cmd = `curl -X POST http://127.0.0.1:3000/clear \\\n  -H "Content-Type: application/json" \\\n  -d '{"url":"${url}"}'`;
+        cmd = `curl -X POST http://127.0.0.1:3000/clear \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "url": "${url}"${proxyField}\n  }'`;
       } else {
-        cmd = `curl -X POST http://127.0.0.1:3000/solve \\\n  -H "Content-Type: application/json" \\\n  -d '{"url":"${url}","sitekey":"${sitekey}"}'`;
+        cmd = `curl -X POST http://127.0.0.1:3000/solve \\\n  -H "Content-Type: application/json" \\\n  -d '{\n    "url": "${url}",\n    "sitekey": "${sitekey}"${proxyField}\n  }'`;
       }
       document.getElementById('curl-snippet').textContent = cmd;
     }

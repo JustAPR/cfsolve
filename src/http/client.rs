@@ -115,7 +115,10 @@ impl BrowserClient {
             .redirect(Policy::limited(5))
             .timeout(Duration::from_secs(30));
         if let Some(proxy) = proxy {
-            builder = builder.proxy(Proxy::all(proxy)?);
+            let normalized = normalize_proxy(proxy);
+            if !normalized.is_empty() {
+                builder = builder.proxy(Proxy::all(&normalized)?);
+            }
         }
         if let Some(pem) = trusted_root {
             let store = CertStore::from_pem_certs([pem]).context("reading the trusted root")?;
@@ -326,6 +329,110 @@ fn decode_hex(text: &str) -> Result<Vec<u8>> {
     Ok((0..text.len()).step_by(2).map(byte).collect())
 }
 
+/// Normalizes arbitrary proxy input strings into standard URI format.
+///
+/// Handles common proxy formats:
+/// - `(Socks5)host:port` -> `socks5://host:port`
+/// - `(Socks5)host:port:user:pass` -> `socks5://user:pass@host:port`
+/// - `host:port:user:pass` -> `http://user:pass@host:port` (defaults to http)
+/// - `user:pass:host:port` -> `http://user:pass@host:port`
+/// - `host:port` -> `http://host:port`
+/// - `user:pass@host:port` -> `http://user:pass@host:port`
+/// - Comma/newline separated proxy lists (takes the first proxy entry)
+pub fn normalize_proxy(raw: &str) -> String {
+    let mut s = raw.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+
+    // If multiple proxies are separated by comma, semicolon or newline, take the first one
+    if let Some(first) = s.split([',', ';', '\n', '\r']).map(str::trim).find(|p| !p.is_empty()) {
+        s = first;
+    }
+
+    let mut scheme = "http";
+
+    // Check for leading tag like (socks5), [socks5], (http), [https], etc.
+    if s.starts_with('(') || s.starts_with('[') {
+        let close_char = if s.starts_with('(') { ')' } else { ']' };
+        if let Some(idx) = s.find(close_char) {
+            let tag = s[1..idx].trim().to_ascii_lowercase();
+            match tag.as_str() {
+                "socks5" | "socks" => scheme = "socks5",
+                "socks5h" => scheme = "socks5h",
+                "https" => scheme = "https",
+                "http" => scheme = "http",
+                _ => {}
+            }
+            s = s[idx + 1..].trim();
+        }
+    }
+
+    // Check if s already has a scheme://
+    if let Some(idx) = s.find("://") {
+        let existing_scheme = &s[..idx];
+        let rest = &s[idx + 3..];
+        return format!("{}://{}", existing_scheme.to_ascii_lowercase(), rest.trim());
+    }
+
+    // Check if s starts with scheme: without slashes, e.g. "socks5:1.2.3.4:1080"
+    for prefix in &["socks5h:", "socks5:", "https:", "http:", "socks:"] {
+        if s.to_ascii_lowercase().starts_with(prefix) {
+            let tag = prefix[..prefix.len() - 1].to_ascii_lowercase();
+            match tag.as_str() {
+                "socks5" | "socks" => scheme = "socks5",
+                "socks5h" => scheme = "socks5h",
+                "https" => scheme = "https",
+                "http" => scheme = "http",
+                _ => {}
+            }
+            s = s[prefix.len()..].trim();
+            break;
+        }
+    }
+
+    // If it already has an '@', e.g. user:pass@host:port
+    if s.contains('@') {
+        return format!("{scheme}://{s}");
+    }
+
+    // Split by ':'
+    let parts: Vec<&str> = s.split(':').map(str::trim).collect();
+    match parts.as_slice() {
+        // 4 parts: host:port:user:pass OR user:pass:host:port
+        [p0, p1, p2, p3] => {
+            let p1_is_port = p1.parse::<u16>().is_ok();
+            let p3_is_port = p3.parse::<u16>().is_ok();
+
+            if p1_is_port && !p3_is_port {
+                // host:port:user:pass
+                let host = p0;
+                let port = p1;
+                let user = p2;
+                let pass = p3;
+                format!("{scheme}://{user}:{pass}@{host}:{port}")
+            } else if p3_is_port && !p1_is_port {
+                // user:pass:host:port
+                let user = p0;
+                let pass = p1;
+                let host = p2;
+                let port = p3;
+                format!("{scheme}://{user}:{pass}@{host}:{port}")
+            } else {
+                // Default fallback: host:port:user:pass
+                format!("{scheme}://{p2}:{p3}@{p0}:{p1}")
+            }
+        }
+        // 2 parts: host:port
+        [host, port] => {
+            format!("{scheme}://{host}:{port}")
+        }
+        _ => {
+            format!("{scheme}://{s}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +444,57 @@ mod tests {
         assert_eq!(urgency("u=1"), 1);
         assert_eq!(urgency("i"), 3);
         assert_eq!(urgency(""), 3);
+    }
+
+    #[test]
+    fn normalize_proxy_handles_custom_and_standard_formats() {
+        // (Socks5)host:port
+        assert_eq!(
+            normalize_proxy("(Socks5)47.91.110.148:8443"),
+            "socks5://47.91.110.148:8443"
+        );
+
+        // (Socks5)host:port:user:pass
+        assert_eq!(
+            normalize_proxy("(Socks5)ams.socks.ipvanish.com:1080:caEVXGbA:QJACVaY5k"),
+            "socks5://caEVXGbA:QJACVaY5k@ams.socks.ipvanish.com:1080"
+        );
+
+        // host:port:user:pass with default http
+        assert_eq!(
+            normalize_proxy("107.172.241.122:12345:tickets:proxyon145"),
+            "http://tickets:proxyon145@107.172.241.122:12345"
+        );
+
+        // user:pass:host:port with default http
+        assert_eq!(
+            normalize_proxy("tickets:proxyon145:107.172.241.122:12345"),
+            "http://tickets:proxyon145@107.172.241.122:12345"
+        );
+
+        // host:port
+        assert_eq!(normalize_proxy("1.2.3.4:8080"), "http://1.2.3.4:8080");
+
+        // user:pass@host:port
+        assert_eq!(
+            normalize_proxy("admin:pass@1.2.3.4:8080"),
+            "http://admin:pass@1.2.3.4:8080"
+        );
+
+        // Already standard URL
+        assert_eq!(
+            normalize_proxy("socks5://user:pass@1.2.3.4:1080"),
+            "socks5://user:pass@1.2.3.4:1080"
+        );
+        assert_eq!(
+            normalize_proxy("http://1.2.3.4:8080"),
+            "http://1.2.3.4:8080"
+        );
+
+        // Comma-separated list takes first
+        assert_eq!(
+            normalize_proxy("(Socks5)47.91.110.148:8443,107.172.241.122:12345:tickets:proxyon145"),
+            "socks5://47.91.110.148:8443"
+        );
     }
 }

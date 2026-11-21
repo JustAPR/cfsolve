@@ -8,7 +8,7 @@ mod requests;
 
 #[cfg(feature = "internals")]
 pub(crate) use client::Proxied;
-pub use client::{BrowserClient, ClientHello, Requests};
+pub use client::{BrowserClient, ClientHello, Requests, normalize_proxy};
 pub use decode::{ResponseMetrics, header_text, read_encoded, text_headers};
 #[cfg(feature = "internals")]
 pub(crate) use decode::{decode_body, encode_body};
