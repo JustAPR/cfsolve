@@ -90,6 +90,7 @@ pub async fn turnstile_handler(
 
         let page_source = match payload.page_source.as_deref() {
             Some("blank") => PageSource::Blank,
+            Some("navigate") => PageSource::Navigate,
             Some("html") => PageSource::Html {
                 html: payload.html.unwrap_or_default(),
                 referrer_policy: payload.referrer_policy,
@@ -100,6 +101,8 @@ pub async fn turnstile_handler(
                         html,
                         referrer_policy: payload.referrer_policy,
                     }
+                } else if widget.is_some() {
+                    PageSource::Blank
                 } else {
                     PageSource::Navigate
                 }
@@ -121,7 +124,7 @@ pub async fn turnstile_handler(
         let token = browser
             .solve_turnstile(turnstile, &options)
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .map_err(format_cf_error)?;
 
         Ok::<String, anyhow::Error>(token)
     };
@@ -205,13 +208,13 @@ pub async fn clear_handler(
             browser
                 .clear_fetched(fetched, &options)
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .map_err(format_cf_error)?
         } else {
             let url = Url::parse(&payload.url)?;
             browser
                 .clear(&url, &options)
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .map_err(format_cf_error)?
         };
 
         Ok::<Clearance, anyhow::Error>(clearance)
@@ -304,7 +307,7 @@ pub async fn solve_handler(
         let outcome = browser
             .solve(&url, &options)
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .map_err(format_cf_error)?;
 
         Ok::<Outcome, anyhow::Error>(outcome)
     };
@@ -403,4 +406,19 @@ fn extract_cookie_info(cookies: &[cfsolve::Cookie<'static>]) -> (Vec<CookieData>
 
     let cookie_header = header_parts.join("; ");
     (data, cookie_header)
+}
+
+fn format_cf_error(err: cfsolve::Error) -> anyhow::Error {
+    match err {
+        cfsolve::Error::Network(e)
+        | cfsolve::Error::Config(e)
+        | cfsolve::Error::Rejected { error: e, .. }
+        | cfsolve::Error::Sink(e)
+        | cfsolve::Error::Unsupported(e) => {
+            let mut chain: Vec<String> = e.chain().map(|c| c.to_string()).collect();
+            chain.dedup();
+            anyhow::anyhow!("{}", chain.join(": "))
+        }
+        other => anyhow::anyhow!("{other}"),
+    }
 }
