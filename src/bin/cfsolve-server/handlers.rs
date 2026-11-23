@@ -13,6 +13,7 @@ use crate::models::{
     ClearRequest, ClearResponse, CookieData, HealthResponse, SolveRequest, SolveResponse,
     TurnstileRequest, TurnstileResponse,
 };
+use crate::pool::PoolKey;
 use crate::state::{AppState, RequestTracker};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
@@ -50,6 +51,8 @@ pub async fn index_handler(headers: HeaderMap) -> Response {
 /// Health and status handler.
 pub async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
     let loaded = state.list_profiles().await;
+    let (hits, misses) = state.token_pool.stats();
+    let pooled = state.token_pool.total_count().await;
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -58,6 +61,9 @@ pub async fn health_handler(State(state): State<AppState>) -> Json<HealthRespons
         active_requests: state.active_requests.load(Ordering::Relaxed),
         total_requests: state.total_requests.load(Ordering::Relaxed),
         failed_requests: state.failed_requests.load(Ordering::Relaxed),
+        pooled_tokens: pooled,
+        pool_hits: hits,
+        pool_misses: misses,
     })
 }
 
@@ -69,6 +75,38 @@ pub async fn turnstile_handler(
     let _tracker = RequestTracker::new(state.active_requests.clone());
     state.total_requests.fetch_add(1, Ordering::Relaxed);
     let start_time = Instant::now();
+
+    let use_pool = payload.pre_mint.unwrap_or(true);
+    let normalized_proxy = payload.proxy.as_deref().map(cfsolve::normalize_proxy);
+
+    let pool_key = payload.sitekey.as_ref().map(|sitekey| PoolKey {
+        sitekey: sitekey.clone(),
+        action: payload.action.clone(),
+        cdata: payload.cdata.clone(),
+        url: payload.url.clone(),
+        profile: payload.profile.clone(),
+        proxy: normalized_proxy.clone(),
+    });
+
+    if use_pool {
+        if let Some(ref key) = pool_key {
+            if let Some(token) = state.token_pool.pop(key).await {
+                // Background replenish 1 token to keep the pool warm
+                state.trigger_replenish(key.clone(), 1);
+
+                return (
+                    StatusCode::OK,
+                    Json(TurnstileResponse {
+                        success: true,
+                        token: Some(token),
+                        error: None,
+                        elapsed_ms: start_time.elapsed().as_millis(),
+                        cached: Some(true),
+                    }),
+                );
+            }
+        }
+    }
 
     let timeout_duration =
         Duration::from_secs(payload.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS));
@@ -82,10 +120,10 @@ pub async fn turnstile_handler(
         let browser = state.get_browser(payload.profile.as_deref()).await?;
         let parsed_url = Url::parse(&payload.url)?;
 
-        let widget = payload.sitekey.map(|key| Widget {
-            sitekey: key,
-            action: payload.action,
-            cdata: payload.cdata,
+        let widget = payload.sitekey.as_ref().map(|key| Widget {
+            sitekey: key.clone(),
+            action: payload.action.clone(),
+            cdata: payload.cdata.clone(),
         });
 
         let page_source = match payload.page_source.as_deref() {
@@ -130,15 +168,24 @@ pub async fn turnstile_handler(
     };
 
     match tokio::time::timeout(timeout_duration, solve_future).await {
-        Ok(Ok(token)) => (
-            StatusCode::OK,
-            Json(TurnstileResponse {
-                success: true,
-                token: Some(token),
-                error: None,
-                elapsed_ms: start_time.elapsed().as_millis(),
-            }),
-        ),
+        Ok(Ok(token)) => {
+            if use_pool {
+                if let Some(ref key) = pool_key {
+                    // Queue was cold or missed: pre-mint 2 reserve tokens into pool in background
+                    state.trigger_replenish(key.clone(), 2);
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(TurnstileResponse {
+                    success: true,
+                    token: Some(token),
+                    error: None,
+                    elapsed_ms: start_time.elapsed().as_millis(),
+                    cached: Some(false),
+                }),
+            )
+        }
         Ok(Err(err)) => {
             state.failed_requests.fetch_add(1, Ordering::Relaxed);
             tracing::error!("Turnstile solve error: {err:#}");
@@ -149,6 +196,7 @@ pub async fn turnstile_handler(
                     token: None,
                     error: Some(format!("{err:#}")),
                     elapsed_ms: start_time.elapsed().as_millis(),
+                    cached: None,
                 }),
             )
         }
@@ -164,6 +212,7 @@ pub async fn turnstile_handler(
                         timeout_duration.as_secs()
                     )),
                     elapsed_ms: start_time.elapsed().as_millis(),
+                    cached: None,
                 }),
             )
         }

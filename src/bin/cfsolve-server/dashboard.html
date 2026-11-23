@@ -585,9 +585,9 @@
         <span class="metric-sub">Min: <span id="stat-min-latency">—</span> | Max: <span id="stat-max-latency">—</span></span>
       </div>
       <div class="metric-card">
-        <span class="metric-label">Deobfuscation Cache</span>
-        <span class="metric-value metric-highlight-green">Active</span>
-        <span class="metric-sub">SHA-256 AST Cache & Worker Pool</span>
+        <span class="metric-label">Pre-Mint Token Pool</span>
+        <span class="metric-value metric-highlight-green" id="stat-pool-count">0</span>
+        <span class="metric-sub"><span id="stat-pool-hits" style="color: var(--success); font-weight: 700;">0 hits</span> · 0ms instant pop</span>
       </div>
     </section>
 
@@ -808,6 +808,12 @@
             select.appendChild(opt);
           });
         }
+        if (data.pooled_tokens !== undefined) {
+          document.getElementById('stat-pool-count').textContent = data.pooled_tokens;
+        }
+        if (data.pool_hits !== undefined) {
+          document.getElementById('stat-pool-hits').textContent = `${data.pool_hits} hits`;
+        }
       } catch (err) {
         console.warn('Metrics polling error:', err);
       }
@@ -884,10 +890,15 @@
 
         if (response.ok && data.success) {
           statusBadge.style.color = 'var(--success)';
-          statusBadge.textContent = `✓ Solved Successfully (${data.elapsed_ms || elapsed} ms)`;
+          if (data.cached) {
+            statusBadge.textContent = `⚡ Instant Token (Pre-Mint Pool Pop: ${data.elapsed_ms || elapsed} ms)`;
+            showToast(`⚡ Instant Token from Pool (${elapsed} ms)!`);
+          } else {
+            statusBadge.textContent = `✓ Solved Successfully (${data.elapsed_ms || elapsed} ms) — Minting Reserves in BG`;
+            showToast(`Solved in ${elapsed} ms! Reserve tokens minting...`);
+          }
           const token = data.token || (data.clearance ? data.clearance.cf_clearance : JSON.stringify(data, null, 2));
           resultContent.textContent = token;
-          showToast(`Solved in ${elapsed} ms!`);
 
           recordSolve({
             mode: currentMode,

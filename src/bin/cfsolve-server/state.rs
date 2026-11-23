@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 use anyhow::{Context, Result, anyhow};
-use cfsolve::Browser;
+use cfsolve::{Browser, Options, PageSource, Turnstile, Widget};
+use url::Url;
+
+use crate::pool::{PoolKey, TokenPool};
 
 /// Global application state shared across all async Axum worker tasks.
 #[derive(Clone)]
@@ -17,6 +20,7 @@ pub struct AppState {
     pub active_requests: Arc<AtomicU64>,
     pub total_requests: Arc<AtomicU64>,
     pub failed_requests: Arc<AtomicU64>,
+    pub token_pool: TokenPool,
 }
 
 /// RAII guard to track active requests cleanly and reliably.
@@ -110,6 +114,16 @@ impl AppState {
             });
         let solve_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
 
+        let pool = TokenPool::default();
+        let pool_for_gc = pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                pool_for_gc.prune_expired().await;
+            }
+        });
+
         Ok(Self {
             default_profile_name: canonical_default,
             profile_dir,
@@ -118,6 +132,7 @@ impl AppState {
             active_requests: Arc::new(AtomicU64::new(0)),
             total_requests: Arc::new(AtomicU64::new(0)),
             failed_requests: Arc::new(AtomicU64::new(0)),
+            token_pool: pool,
         })
     }
 
@@ -182,5 +197,78 @@ impl AppState {
     pub async fn list_profiles(&self) -> Vec<String> {
         let map = self.browsers.read().await;
         map.keys().cloned().collect()
+    }
+
+    /// Triggers background pre-minting worker tasks to refill the pool up to `target_count` tokens.
+    pub fn trigger_replenish(&self, key: PoolKey, target_count: usize) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let needed = state.token_pool.needed_count(&key).await;
+            if needed == 0 {
+                return;
+            }
+            let spawn_count = needed.min(target_count);
+            state.token_pool.register_in_flight(&key, spawn_count).await;
+
+            for _ in 0..spawn_count {
+                let state_inner = state.clone();
+                let key_inner = key.clone();
+                tokio::spawn(async move {
+                    let solve_res = async {
+                        let _permit = state_inner
+                            .solve_semaphore
+                            .acquire()
+                            .await
+                            .map_err(|_| anyhow!("Server semaphore closed"))?;
+                        let browser = state_inner.get_browser(key_inner.profile.as_deref()).await?;
+                        let parsed_url = Url::parse(&key_inner.url)?;
+                        let widget = Some(Widget {
+                            sitekey: key_inner.sitekey.clone(),
+                            action: key_inner.action.clone(),
+                            cdata: key_inner.cdata.clone(),
+                        });
+                        let turnstile = Turnstile {
+                            url: parsed_url,
+                            page: PageSource::Blank,
+                            widget,
+                        };
+                        let options = Options {
+                            proxy: key_inner.proxy.clone(),
+                            trusted_root: None,
+                            sink: None,
+                        };
+                        let token = browser
+                            .solve_turnstile(turnstile, &options)
+                            .await
+                            .map_err(|e| anyhow!("{e}"))?;
+                        Ok::<String, anyhow::Error>(token)
+                    }
+                    .await;
+
+                    match solve_res {
+                        Ok(token) => {
+                            tracing::info!(
+                                "Pre-minted fresh Turnstile token into pool for sitekey: {}",
+                                key_inner.sitekey
+                            );
+                            state_inner
+                                .token_pool
+                                .finish_in_flight(&key_inner, Some(token))
+                                .await;
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "Background pre-minting failed for sitekey {}: {err:#}",
+                                key_inner.sitekey
+                            );
+                            state_inner
+                                .token_pool
+                                .finish_in_flight(&key_inner, None)
+                                .await;
+                        }
+                    }
+                });
+            }
+        });
     }
 }

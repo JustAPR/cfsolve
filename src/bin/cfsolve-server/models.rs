@@ -24,6 +24,9 @@ pub struct TurnstileRequest {
     pub profile: Option<String>,
     /// Maximum time in seconds to wait for solving (default 60s).
     pub timeout_seconds: Option<u64>,
+    /// Whether to use the pre-minted token pool (default true). Set to false to force on-demand synchronous solve.
+    #[serde(default)]
+    pub pre_mint: Option<bool>,
 }
 
 /// Response payload for Turnstile solving.
@@ -35,6 +38,8 @@ pub struct TurnstileResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub elapsed_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached: Option<bool>,
 }
 
 /// Optional input representing an already-fetched challenge page (status 403).
@@ -136,4 +141,7 @@ pub struct HealthResponse {
     pub active_requests: u64,
     pub total_requests: u64,
     pub failed_requests: u64,
+    pub pooled_tokens: usize,
+    pub pool_hits: u64,
+    pub pool_misses: u64,
 }
