@@ -589,6 +589,11 @@
         <span class="metric-value metric-highlight-green" id="stat-pool-count">0</span>
         <span class="metric-sub"><span id="stat-pool-hits" style="color: var(--success); font-weight: 700;">0 hits</span> · 0ms instant pop</span>
       </div>
+      <div class="metric-card">
+        <span class="metric-label">Leased Buckets</span>
+        <span class="metric-value metric-highlight-green" id="stat-active-buckets">0</span>
+        <span class="metric-sub">Autonomous refill sessions</span>
+      </div>
     </section>
 
     <!-- Content Split Layout -->
@@ -726,6 +731,73 @@
         </div>
       </section>
     </div>
+
+    <!-- Token Bucket Sessions Panel -->
+    <section class="card" style="margin-top: 1.5rem;">
+      <div class="card-header">
+        <div class="card-title">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+          Leased Token Bucket Manager (0ms Instant Pop & Background Auto-Refill)
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="fetchBuckets()">↻ Refresh Buckets</button>
+      </div>
+
+      <div class="card-body">
+        <div style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.4;">
+          Start a dedicated token bucket session for your target sitekey. The server keeps the bucket continuously filled to target capacity in the background using a single throttled worker task. Client threads pop tokens with <strong>0ms latency</strong>. Sessions auto-terminate when closed, on server restart, or after <strong>30 minutes of inactivity</strong>.
+        </div>
+
+        <!-- Start Bucket Form -->
+        <div style="background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+          <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-main);">Create or Update Leased Bucket Session</div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="bucket-session-id">Session ID (Optional, auto-generated if blank)</label>
+              <input type="text" id="bucket-session-id" placeholder="e.g. scraper-worker-1">
+            </div>
+            <div class="form-group">
+              <label for="bucket-capacity">Bucket Capacity (Tokens to keep ready)</label>
+              <input type="number" id="bucket-capacity" value="5" min="1" max="20">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="bucket-url">Target URL</label>
+              <input type="url" id="bucket-url" value="https://jerryccs.com/auth/">
+            </div>
+            <div class="form-group">
+              <label for="bucket-sitekey">Turnstile Sitekey</label>
+              <input type="text" id="bucket-sitekey" value="0x4AAAAAAFOskVGnd7MM-REl">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="bucket-proxy">Egress Proxy (Optional)</label>
+              <input type="text" id="bucket-proxy" placeholder="(Socks5)host:port:user:pass or http://...">
+            </div>
+            <div class="form-group">
+              <label for="bucket-idle-ttl">Idle Inactivity Expiry (Minutes, default 30)</label>
+              <input type="number" id="bucket-idle-ttl" value="30" min="1" max="180">
+            </div>
+          </div>
+          <div style="display: flex; justify-content: flex-end; margin-top: 0.25rem;">
+            <button class="btn btn-primary" onclick="startBucketSession()">
+              <span>🚀</span> Start Leased Bucket
+            </button>
+          </div>
+        </div>
+
+        <!-- Active Buckets Table -->
+        <div style="margin-top: 0.5rem;">
+          <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-main); margin-bottom: 0.5rem;">Active Bucket Sessions</div>
+          <div id="buckets-container" style="display: flex; flex-direction: column; gap: 0.5rem;">
+            <div style="text-align: center; color: var(--text-sub); font-size: 0.85rem; padding: 1.5rem; background: var(--code-bg); border-radius: 6px; border: 1px dashed var(--border);">
+              No leased bucket sessions active. Create one above to enable continuous 0ms token pre-minting.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <!-- Toast -->
@@ -742,8 +814,10 @@
     // Initialize
     window.addEventListener('DOMContentLoaded', () => {
       fetchHealthMetrics();
+      fetchBuckets();
       updateCurlSnippet();
       setInterval(fetchHealthMetrics, 3000);
+      setInterval(fetchBuckets, 4000);
 
       // Listeners for snippet update
       document.getElementById('input-url').addEventListener('input', updateCurlSnippet);
@@ -813,6 +887,9 @@
         }
         if (data.pool_hits !== undefined) {
           document.getElementById('stat-pool-hits').textContent = `${data.pool_hits} hits`;
+        }
+        if (data.active_buckets !== undefined) {
+          document.getElementById('stat-active-buckets').textContent = data.active_buckets;
         }
       } catch (err) {
         console.warn('Metrics polling error:', err);
@@ -1109,6 +1186,130 @@
       setTimeout(() => {
         toast.classList.remove('show');
       }, 2500);
+    }
+
+    // --- Token Bucket Management ---
+    async function fetchBuckets() {
+      try {
+        const res = await fetch('/buckets');
+        if (!res.ok) return;
+        const buckets = await res.json();
+        const container = document.getElementById('buckets-container');
+        if (!buckets || buckets.length === 0) {
+          container.innerHTML = `
+            <div style="text-align: center; color: var(--text-sub); font-size: 0.85rem; padding: 1.5rem; background: var(--code-bg); border-radius: 6px; border: 1px dashed var(--border);">
+              No leased bucket sessions active. Create one above to enable continuous 0ms token pre-minting.
+            </div>`;
+          return;
+        }
+
+        container.innerHTML = buckets.map(b => {
+          const fillPercent = Math.min(100, Math.round((b.ready_tokens / b.capacity) * 100));
+          const minsRemaining = Math.floor(b.idle_seconds_remaining / 60);
+          return `
+            <div style="background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.85rem; display: flex; flex-direction: column; gap: 0.5rem;">
+              <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <span style="font-weight: 700; color: var(--accent); font-family: monospace;">${b.session_id}</span>
+                  <span style="font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 4px; background: rgba(16, 185, 129, 0.15); color: var(--success); font-weight: 600;">${b.status}</span>
+                </div>
+                <div style="display: flex; gap: 0.5rem;">
+                  <button class="btn btn-primary btn-sm" onclick="popBucketToken('${b.session_id}')" title="Pop a token from bucket instantly">
+                    ⚡ Pop Token (0ms)
+                  </button>
+                  <button class="btn btn-secondary btn-sm" style="color: var(--danger); border-color: rgba(239, 68, 68, 0.3);" onclick="stopBucketSession('${b.session_id}')" title="Halt minters and close bucket">
+                    ✖ Close
+                  </button>
+                </div>
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.5rem; font-size: 0.75rem; color: var(--text-muted);">
+                <div>Capacity: <strong style="color: var(--text-main);">${b.ready_tokens} / ${b.capacity}</strong> tokens</div>
+                <div>Minters in-flight: <strong style="color: var(--text-main);">${b.in_flight_minters}</strong></div>
+                <div>Total Minted: <strong style="color: var(--text-main);">${b.total_minted}</strong></div>
+                <div>Total Consumed: <strong style="color: var(--text-main);">${b.total_consumed}</strong></div>
+                <div>Idle TTL: <strong style="color: ${minsRemaining < 5 ? 'var(--warning)' : 'var(--text-main)'};">${minsRemaining}m left</strong></div>
+              </div>
+              <!-- Gauge -->
+              <div style="height: 4px; background: rgba(255,255,255,0.08); border-radius: 2px; overflow: hidden;">
+                <div style="width: ${fillPercent}%; height: 100%; background: ${fillPercent > 50 ? 'var(--success)' : 'var(--accent)'}; transition: width 0.3s;"></div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (err) {
+        console.warn('Failed to fetch buckets:', err);
+      }
+    }
+
+    async function startBucketSession() {
+      const sessionId = document.getElementById('bucket-session-id').value.trim() || undefined;
+      const capacity = parseInt(document.getElementById('bucket-capacity').value, 10) || 5;
+      const url = document.getElementById('bucket-url').value.trim();
+      const sitekey = document.getElementById('bucket-sitekey').value.trim();
+      const rawProxy = document.getElementById('bucket-proxy').value.trim();
+      const proxy = rawProxy ? normalizeProxyJs(rawProxy) : undefined;
+      const idleMinutes = parseInt(document.getElementById('bucket-idle-ttl').value, 10) || 30;
+
+      if (!url || !sitekey) {
+        showToast('URL and Sitekey are required');
+        return;
+      }
+
+      try {
+        const res = await fetch('/bucket/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            capacity: capacity,
+            url: url,
+            sitekey: sitekey,
+            proxy: proxy,
+            idle_timeout_minutes: idleMinutes
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast(`Bucket '${data.session_id}' started!`);
+          fetchBuckets();
+        } else {
+          showToast('Failed: ' + (data.message || 'unknown error'));
+        }
+      } catch (err) {
+        showToast('Network error starting bucket');
+      }
+    }
+
+    async function popBucketToken(sessionId) {
+      try {
+        const start = performance.now();
+        const res = await fetch(`/bucket/${sessionId}/token`);
+        const elapsed = (performance.now() - start).toFixed(0);
+        const data = await res.json();
+        if (data.success && data.token) {
+          navigator.clipboard.writeText(data.token);
+          showToast(`⚡ 0ms Pop (${data.elapsed_ms}ms)! Copied to clipboard. Remaining: ${data.remaining}`);
+          fetchBuckets();
+        } else {
+          showToast(`Pop failed: ${data.error || 'Empty bucket'}`);
+        }
+      } catch (err) {
+        showToast('Network error popping token');
+      }
+    }
+
+    async function stopBucketSession(sessionId) {
+      if (!confirm(`Halt background minters and delete bucket '${sessionId}'?`)) return;
+      try {
+        const res = await fetch(`/bucket/${sessionId}/stop`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showToast(`Bucket '${sessionId}' closed and deleted`);
+          fetchBuckets();
+        }
+      } catch (err) {
+        showToast('Failed to close bucket');
+      }
     }
   </script>
 </body>

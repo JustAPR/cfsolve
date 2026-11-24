@@ -1,3 +1,4 @@
+mod bucket;
 mod handlers;
 mod models;
 mod pool;
@@ -15,8 +16,9 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::handlers::{
-    clear_handler, dashboard_handler, health_handler, index_handler, solve_handler,
-    turnstile_handler,
+    bucket_close_handler, bucket_list_handler, bucket_start_handler, bucket_status_handler,
+    bucket_token_handler, clear_handler, dashboard_handler, health_handler, index_handler,
+    solve_handler, turnstile_handler,
 };
 use crate::state::AppState;
 
@@ -101,6 +103,13 @@ async fn main() -> Result<()> {
         .route("/turnstile", post(turnstile_handler))
         .route("/clear", post(clear_handler))
         .route("/solve", post(solve_handler))
+        .route("/bucket/start", post(bucket_start_handler))
+        .route("/bucket", post(bucket_start_handler))
+        .route("/bucket/{session_id}/token", get(bucket_token_handler).post(bucket_token_handler))
+        .route("/bucket/{session_id}/status", get(bucket_status_handler))
+        .route("/bucket/{session_id}", get(bucket_status_handler).delete(bucket_close_handler))
+        .route("/bucket/{session_id}/stop", post(bucket_close_handler))
+        .route("/buckets", get(bucket_list_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);

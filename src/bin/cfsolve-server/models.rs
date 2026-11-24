@@ -27,6 +27,8 @@ pub struct TurnstileRequest {
     /// Whether to use the pre-minted token pool (default true). Set to false to force on-demand synchronous solve.
     #[serde(default)]
     pub pre_mint: Option<bool>,
+    /// Optional leased bucket session identifier to pull from or associate with.
+    pub session_id: Option<String>,
 }
 
 /// Response payload for Turnstile solving.
@@ -144,4 +146,71 @@ pub struct HealthResponse {
     pub pooled_tokens: usize,
     pub pool_hits: u64,
     pub pool_misses: u64,
+    pub active_buckets: usize,
+}
+
+/// Request payload to create or update an autonomous leased token bucket session.
+#[derive(Debug, Deserialize)]
+pub struct BucketStartRequest {
+    /// Unique session identifier (e.g. "scraper-worker-1", or auto-generated if omitted).
+    pub session_id: Option<String>,
+    /// Target page URL.
+    pub url: String,
+    /// Turnstile sitekey.
+    pub sitekey: String,
+    /// Optional action.
+    pub action: Option<String>,
+    /// Optional cdata.
+    pub cdata: Option<String>,
+    /// Optional proxy (e.g. "socks5://...", "(Socks5)host:port:user:pass", or "http://...").
+    pub proxy: Option<String>,
+    /// Browser profile name (defaults to "safari-26-ios").
+    pub profile: Option<String>,
+    /// Target bucket capacity (default 5, max 20).
+    pub capacity: Option<usize>,
+    /// Inactivity idle timeout in minutes before bucket auto-deletes (default 30 minutes).
+    pub idle_timeout_minutes: Option<u64>,
+}
+
+/// Response payload when creating or updating a bucket session.
+#[derive(Debug, Serialize)]
+pub struct BucketStartResponse {
+    pub success: bool,
+    pub session_id: String,
+    pub status: &'static str,
+    pub capacity: usize,
+    pub ready_tokens: usize,
+    pub idle_timeout_minutes: u64,
+    pub message: String,
+}
+
+/// Response when popping a token from a bucket session.
+#[derive(Debug, Serialize)]
+pub struct BucketTokenResponse {
+    pub success: bool,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    pub elapsed_ms: u128,
+    pub remaining: usize,
+    pub capacity: usize,
+    pub total_consumed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Detailed status of a bucket session.
+#[derive(Debug, Serialize, Clone)]
+pub struct BucketStatusResponse {
+    pub session_id: String,
+    pub url: String,
+    pub sitekey: String,
+    pub status: &'static str,
+    pub capacity: usize,
+    pub ready_tokens: usize,
+    pub in_flight_minters: usize,
+    pub total_minted: u64,
+    pub total_consumed: u64,
+    pub idle_seconds_remaining: u64,
+    pub uptime_seconds: u64,
 }

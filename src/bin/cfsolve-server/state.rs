@@ -8,6 +8,8 @@ use anyhow::{Context, Result, anyhow};
 use cfsolve::{Browser, Options, PageSource, Turnstile, Widget};
 use url::Url;
 
+use crate::bucket::BucketManager;
+use crate::models::{BucketStartRequest, BucketStatusResponse};
 use crate::pool::{PoolKey, TokenPool};
 
 /// Global application state shared across all async Axum worker tasks.
@@ -21,6 +23,7 @@ pub struct AppState {
     pub total_requests: Arc<AtomicU64>,
     pub failed_requests: Arc<AtomicU64>,
     pub token_pool: TokenPool,
+    pub bucket_manager: BucketManager,
 }
 
 /// RAII guard to track active requests cleanly and reliably.
@@ -124,6 +127,16 @@ impl AppState {
             }
         });
 
+        let bucket_manager = BucketManager::new();
+        let bucket_manager_for_gc = bucket_manager.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                bucket_manager_for_gc.prune_idle_and_expired().await;
+            }
+        });
+
         Ok(Self {
             default_profile_name: canonical_default,
             profile_dir,
@@ -133,6 +146,7 @@ impl AppState {
             total_requests: Arc::new(AtomicU64::new(0)),
             failed_requests: Arc::new(AtomicU64::new(0)),
             token_pool: pool,
+            bucket_manager,
         })
     }
 
@@ -197,6 +211,19 @@ impl AppState {
     pub async fn list_profiles(&self) -> Vec<String> {
         let map = self.browsers.read().await;
         map.keys().cloned().collect()
+    }
+
+    /// Creates or updates an autonomous leased token bucket session.
+    pub async fn start_bucket(&self, req: BucketStartRequest) -> Result<BucketStatusResponse> {
+        let state = self.clone();
+        let loader = move |profile: Option<&str>| {
+            let state = state.clone();
+            let profile_owned = profile.map(|s| s.to_string());
+            Box::pin(async move {
+                state.get_browser(profile_owned.as_deref()).await
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<Browser>>> + Send>>
+        };
+        self.bucket_manager.start_session(req, loader, self.solve_semaphore.clone()).await
     }
 
     /// Triggers background pre-minting worker tasks to refill the pool up to `target_count` tokens.

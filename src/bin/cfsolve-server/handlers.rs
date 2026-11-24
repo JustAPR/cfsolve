@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use url::Url;
@@ -10,6 +10,7 @@ use url::Url;
 use cfsolve::{Clearance, FetchedPage, Options, Outcome, PageSource, Turnstile, Widget};
 
 use crate::models::{
+    BucketStartRequest, BucketStartResponse, BucketStatusResponse, BucketTokenResponse,
     ClearRequest, ClearResponse, CookieData, HealthResponse, SolveRequest, SolveResponse,
     TurnstileRequest, TurnstileResponse,
 };
@@ -53,6 +54,7 @@ pub async fn health_handler(State(state): State<AppState>) -> Json<HealthRespons
     let loaded = state.list_profiles().await;
     let (hits, misses) = state.token_pool.stats();
     let pooled = state.token_pool.total_count().await;
+    let active_buckets = state.bucket_manager.list_sessions().await.len();
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -64,6 +66,7 @@ pub async fn health_handler(State(state): State<AppState>) -> Json<HealthRespons
         pooled_tokens: pooled,
         pool_hits: hits,
         pool_misses: misses,
+        active_buckets,
     })
 }
 
@@ -75,6 +78,26 @@ pub async fn turnstile_handler(
     let _tracker = RequestTracker::new(state.active_requests.clone());
     state.total_requests.fetch_add(1, Ordering::Relaxed);
     let start_time = Instant::now();
+
+    // If request specifies a leased bucket session, pop directly from it in 0ms
+    if let Some(ref session_id) = payload.session_id {
+        if let Ok(Some((token, _rem, _cap, _cons))) = state
+            .bucket_manager
+            .pop_token(session_id, Duration::from_millis(100))
+            .await
+        {
+            return (
+                StatusCode::OK,
+                Json(TurnstileResponse {
+                    success: true,
+                    token: Some(token),
+                    error: None,
+                    elapsed_ms: start_time.elapsed().as_millis(),
+                    cached: Some(true),
+                }),
+            );
+        }
+    }
 
     let use_pool = payload.pre_mint.unwrap_or(true);
     let normalized_proxy = payload.proxy.as_deref().map(cfsolve::normalize_proxy);
@@ -457,7 +480,7 @@ fn extract_cookie_info(cookies: &[cfsolve::Cookie<'static>]) -> (Vec<CookieData>
     (data, cookie_header)
 }
 
-fn format_cf_error(err: cfsolve::Error) -> anyhow::Error {
+pub fn format_cf_error(err: cfsolve::Error) -> anyhow::Error {
     match err {
         cfsolve::Error::Network(e)
         | cfsolve::Error::Config(e)
@@ -469,5 +492,154 @@ fn format_cf_error(err: cfsolve::Error) -> anyhow::Error {
             anyhow::anyhow!("{}", chain.join(": "))
         }
         other => anyhow::anyhow!("{other}"),
+    }
+}
+
+/// Creates or updates a leased token bucket session.
+pub async fn bucket_start_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<BucketStartRequest>,
+) -> (StatusCode, Json<BucketStartResponse>) {
+    let idle_mins = payload
+        .idle_timeout_minutes
+        .unwrap_or(crate::bucket::DEFAULT_IDLE_TIMEOUT_MINS);
+    match state.start_bucket(payload).await {
+        Ok(status) => (
+            StatusCode::OK,
+            Json(BucketStartResponse {
+                success: true,
+                session_id: status.session_id,
+                status: status.status,
+                capacity: status.capacity,
+                ready_tokens: status.ready_tokens,
+                idle_timeout_minutes: idle_mins,
+                message: format!(
+                    "Bucket session active. Target capacity: {}, auto-expires if idle for {} mins.",
+                    status.capacity, idle_mins
+                ),
+            }),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(BucketStartResponse {
+                success: false,
+                session_id: String::new(),
+                status: "error",
+                capacity: 0,
+                ready_tokens: 0,
+                idle_timeout_minutes: 0,
+                message: format!("Failed to initialize bucket: {err:#}"),
+            }),
+        ),
+    }
+}
+
+/// Pops a token from a leased bucket session with 0ms response time.
+pub async fn bucket_token_handler(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> (StatusCode, Json<BucketTokenResponse>) {
+    let start_time = Instant::now();
+    // Allow up to 15s wait if bucket is refilling
+    match state
+        .bucket_manager
+        .pop_token(&session_id, Duration::from_secs(15))
+        .await
+    {
+        Ok(Some((token, remaining, capacity, total_consumed))) => (
+            StatusCode::OK,
+            Json(BucketTokenResponse {
+                success: true,
+                session_id,
+                token: Some(token),
+                elapsed_ms: start_time.elapsed().as_millis(),
+                remaining,
+                capacity,
+                total_consumed,
+                error: None,
+            }),
+        ),
+        Ok(None) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(BucketTokenResponse {
+                success: false,
+                session_id,
+                token: None,
+                elapsed_ms: start_time.elapsed().as_millis(),
+                remaining: 0,
+                capacity: 0,
+                total_consumed: 0,
+                error: Some("Bucket empty: timeout waiting for background minter".to_string()),
+            }),
+        ),
+        Err(err) => (
+            StatusCode::NOT_FOUND,
+            Json(BucketTokenResponse {
+                success: false,
+                session_id,
+                token: None,
+                elapsed_ms: start_time.elapsed().as_millis(),
+                remaining: 0,
+                capacity: 0,
+                total_consumed: 0,
+                error: Some(format!("{err:#}")),
+            }),
+        ),
+    }
+}
+
+/// Retrieves the live status of a bucket session.
+pub async fn bucket_status_handler(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(status) = state.bucket_manager.get_status(&session_id).await {
+        (
+            StatusCode::OK,
+            Json(serde_json::to_value(status).unwrap_or_default()),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Bucket session '{}' not found or expired", session_id)
+            })),
+        )
+    }
+}
+
+/// Lists all active bucket sessions.
+pub async fn bucket_list_handler(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<Vec<BucketStatusResponse>>) {
+    let list = state.bucket_manager.list_sessions().await;
+    (StatusCode::OK, Json(list))
+}
+
+/// Closes a bucket session immediately and purges its memory.
+pub async fn bucket_close_handler(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let closed = state.bucket_manager.close_session(&session_id).await;
+    if closed {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "session_id": session_id,
+                "message": "Bucket session halted and deleted from memory"
+            })),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "success": false,
+                "session_id": session_id,
+                "error": "Bucket session not found"
+            })),
+        )
     }
 }
