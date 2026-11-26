@@ -397,9 +397,9 @@ impl WidgetSession<'_> {
         let checkbox_program = match outcome {
             ProgramOutcome::Complete { token } => return self.complete(token, listing, &returned),
             ProgramOutcome::Interaction => crate::stage2::interaction::recover(&listing)?,
-            ProgramOutcome::Other(_) => bail!(Refused::new(
+            ProgramOutcome::Other(strings) => bail!(Refused::new(
                 Stage::Probes,
-                "challenge did not complete after the second POST",
+                format!("challenge did not complete after the second POST (program strings: {strings:?})"),
             )),
         };
         self.sink.json("interaction-plan.json", &checkbox_program)?;
@@ -424,6 +424,10 @@ impl WidgetSession<'_> {
             (ProgramOutcome::Complete { token }, listing) => {
                 self.complete(token, listing, &returned)
             }
+            (ProgramOutcome::Other(strings), _) => bail!(Refused::new(
+                Stage::Interaction,
+                format!("challenge did not complete after the interaction POST (program strings: {strings:?})"),
+            )),
             _ => bail!(Refused::new(
                 Stage::Interaction,
                 "challenge did not complete after the interaction POST",
